@@ -24,7 +24,7 @@ package main
 
 import (
 	"bufio"
-	"es-pcstat/es-collect"
+	es_collect "es-pcstat/es-collect"
 	"flag"
 	"fmt"
 	"io"
@@ -33,9 +33,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elastic/go-elasticsearch/v8"
 	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
 	log "github.com/sirupsen/logrus"
-	"gopkg.in/olivere/elastic.v6"
 )
 
 var (
@@ -133,7 +133,7 @@ func main() {
 		indexStats := shardMap.Stats(path)
 
 		if outputTypeFlag == ES {
-			var outputclient elastic.Client
+			var outputclient elasticsearch.Client
 			if config[OUTPUT_ES_USER] == "" || config[OUTPUT_ES_PASSWORD] == "" || config[OUTPUT_ES_IP_FIELD] == "" || config[OUTPUT_ES_PORT_FIELD] == "" {
 				outputclient = es_collect.OutputClient(config[ES_IP_FIELD], config[ES_PORT_FIELD], config[ES_USER], config[ES_PASSWORD])
 			} else {

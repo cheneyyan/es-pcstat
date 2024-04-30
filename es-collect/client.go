@@ -1,49 +1,49 @@
 package es_collect
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
-	"gopkg.in/olivere/elastic.v6"
+	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/elastic/go-elasticsearch/v8/esutil"
 )
 
 var PCSTAT_INDEX_NAME = "pc_stat"
 var KEEP_INDEX_NUM = 5
 
 var mapping = `
-	{
-		"settings":{
-			"number_of_replicas":0
-		},
-		"mappings":{
-			"_doc":{
-				"properties":{
-					"cluster_name" : {
-						"type" : "keyword"
-					  },
-					  "created" : {
-						"type" : "date"
-					  },
-					  "index_name" : {
-						"type" : "keyword"
-					  },
-					  "node_name" : {
-						"type" : "keyword"
-					  }
-				}
+{
+	"settings":{
+		"number_of_replicas":0
+	},
+	"mappings":{
+		"properties":{
+			"cluster_name" : {
+				"type" : "keyword"
+			},
+			"node_name" : {
+				"type" : "keyword"
+			},
+			"index_name" : {
+				"type" : "keyword"
+			},
+			"created" : {
+				"type" : "date"
 			}
 		}
 	}
+}
 `
 
-//es client for get shards or indices and more
+// es client for get shards or indices and more
 type Client struct {
 	Ip       string
 	Port     string
@@ -60,16 +60,13 @@ func CollectClient(ip string, port string, user string, password string) *Client
 	return instance
 }
 
-func OutputClient(ip string, port string, user string, password string) elastic.Client {
+func OutputClient(ip string, port string, user string, password string) elasticsearch.Client {
 	url := "http://" + ip + ":" + port + "/"
-	client, err := elastic.NewClient(
-		elastic.SetURL(url),
-		elastic.SetSniff(false),
-		elastic.SetHealthcheckInterval(10*time.Second),
-		elastic.SetBasicAuth(user, password),
-		elastic.SetGzip(true),
-		elastic.SetErrorLog(log.New(os.Stderr, "ELASTIC ", log.LstdFlags)),
-		elastic.SetInfoLog(log.New(os.Stdout, "", log.LstdFlags)))
+	client, err := elasticsearch.NewClient(elasticsearch.Config{
+		Addresses: []string{url},
+		Username:  user,
+		Password:  password,
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -159,7 +156,7 @@ func FillShardMapFilterNode(shardMap ShardMap, indexMap IndexMap, nodeName strin
 	return shardMap
 }
 
-//split and skip empty String ""
+// split and skip empty String ""
 func splitWithoutNull(s, sep string) []string {
 	strs := strings.Split(s, sep)
 	res := make([]string, 0)
@@ -171,64 +168,80 @@ func splitWithoutNull(s, sep string) []string {
 	return res
 }
 
-func initPcstatIndex(esClient elastic.Client, indexPrefix string) (string, error) {
+func initPcstatIndex(esClient elasticsearch.Client, indexPrefix string) (string, error) {
 	//create index if not exist
 	realIndex := indexPrefix + "-" + time.Now().Format("2006_01_02")
-	exist, err := esClient.IndexExists(realIndex).Do(context.TODO())
+	exists, err := esClient.Indices.Exists([]string{realIndex})
 	if err != nil {
 		fmt.Errorf("check index exists error,index_name: %s, %s", realIndex, err)
 	}
-	if !exist {
-		createIndex, err := esClient.CreateIndex(realIndex).Body(mapping).IncludeTypeName(true).Do(context.TODO())
-		if err != nil || createIndex == nil || !createIndex.Acknowledged {
-			fmt.Errorf("create index error error, index_name: %s, %s", realIndex, err)
-			return realIndex, &elastic.Error{Status: 500}
+	if exists.StatusCode == 404 {
+		createIndex, err := esClient.Indices.Create(realIndex, esClient.Indices.Create.WithBody(strings.NewReader(mapping)))
+		if err != nil || createIndex == nil || createIndex.StatusCode != 200 {
+			return realIndex, fmt.Errorf("create index error error, index_name: %s, %s", realIndex, err)
 		}
 	}
 
 	//detele index if exist
 	dayBefore := time.Now().AddDate(0, 0, -KEEP_INDEX_NUM-1)
 	toDeleteIndex := indexPrefix + "-" + dayBefore.Format("2006_01_02")
-	deleteExist, _ := esClient.IndexExists(toDeleteIndex).Do(context.TODO())
-	if deleteExist {
-		deleteIndex, error := esClient.DeleteIndex(toDeleteIndex).Do(context.TODO())
-		if error != nil || deleteIndex == nil || !deleteIndex.Acknowledged {
+	deleteExist, _ := esClient.Indices.Exists([]string{toDeleteIndex})
+	if deleteExist.StatusCode == 200 {
+		deleteIndex, error := esClient.Indices.Delete([]string{toDeleteIndex})
+		if error != nil || deleteIndex == nil || deleteIndex.StatusCode != 200 {
 			fmt.Errorf("delete index error error, index_name: %s, %s", toDeleteIndex, error)
 		}
 	}
 	return realIndex, nil
 }
 
-func PostPcstatData(client elastic.Client, docs []PageCacheDoc) {
+func PostPcstatData(client elasticsearch.Client, docs []PageCacheDoc) {
 	esClient := client
-	indexName, error := initPcstatIndex(esClient, PCSTAT_INDEX_NAME)
-	if error != nil {
-		fmt.Printf("create index error, skip bulk data, %s\n", error)
-		return
-	}
-
-	bulkRequest := esClient.Bulk()
-	for _, doc := range docs {
-		indexReq := elastic.NewBulkIndexRequest().Index(indexName).Type("_doc").Doc(doc)
-		bulkRequest = bulkRequest.Add(indexReq)
-	}
-
-	bulkResponse, err := bulkRequest.Do(context.TODO())
-	if bulkResponse == nil {
-		fmt.Errorf("expected bulkResponse to be != nil; got nil")
-		return
-	}
+	indexName, err := initPcstatIndex(esClient, PCSTAT_INDEX_NAME)
 	if err != nil {
-		fmt.Errorf("bulk es data error, %s", err)
+		fmt.Printf("create index error, skip bulk data, %s\n", err)
+		return
 	}
-	if bulkResponse.Errors {
-		fmt.Errorf("bulk error")
-		for _, typeItem := range bulkResponse.Items {
-			for _, item := range typeItem {
-				fmt.Errorf(item.Error.Reason)
-			}
-		}
+
+	bulkRequest, indexerError := esutil.NewBulkIndexer(esutil.BulkIndexerConfig{
+		Index:      indexName,
+		Client:     &client,
+		NumWorkers: 1,
+	})
+	if indexerError != nil {
+		fmt.Errorf("create bulk indexer error, %s", indexerError)
 	}
+	for _, doc := range docs {
+		json, _ := json.Marshal(doc)
+		bulkRequest.Add(context.Background(), esutil.BulkIndexerItem{
+			Action: "index",
+			Index:  indexName,
+			Body:   bytes.NewReader(json),
+			// OnSuccess: func(ctx context.Context, item esutil.BulkIndexerItem, res esutil.BulkIndexerResponseItem) {
+			// 	fmt.Println("success")
+			// },
+			// OnFailure: func(ctx context.Context, item esutil.BulkIndexerItem, res esutil.BulkIndexerResponseItem, err error) {
+			// 	fmt.Println("failure")
+			// },
+		})
+	}
+
+	closeErr := bulkRequest.Close(context.Background())
+	// if bulkResponse == nil {
+	// 	fmt.Errorf("expected bulkResponse to be != nil; got nil")
+	// 	return
+	// }
+	if closeErr != nil {
+		fmt.Errorf("bulk es data error, %s", closeErr)
+	}
+	// if bulkResponse.Errors {
+	// 	fmt.Errorf("bulk error")
+	// 	for _, typeItem := range bulkResponse.Items {
+	// 		for _, item := range typeItem {
+	// 			fmt.Errorf(item.Error.Reason)
+	// 		}
+	// 	}
+	// }
 }
 
 func httpGetRequest(url string, user string, password string) (string, error) {

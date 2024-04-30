@@ -1,7 +1,7 @@
 package es_collect
 
 import (
-	"es-pcstat"
+	es_pcstat "es-pcstat"
 	"fmt"
 	"io/ioutil"
 	"path"
@@ -9,8 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/olivere/elastic.v6"
-
+	"github.com/elastic/go-elasticsearch/v8"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -61,7 +60,7 @@ func getFiles(path string) []string {
 	return files
 }
 
-//"" is file like SEGMENT_N
+// "" is file like SEGMENT_N
 func getFileSuffix(fileName string) string {
 	suffix := path.Ext(fileName)
 	if strings.HasPrefix(suffix, ".") {
@@ -203,7 +202,7 @@ func (indexStats *IndexStats) sort() {
 
 }
 
-func (indexStats IndexStats) WriteToEs(client elastic.Client, clusterName string, nodeName string, createdTime time.Time) {
+func (indexStats IndexStats) WriteToEs(client elasticsearch.Client, clusterName string, nodeName string, createdTime time.Time) {
 	docs := indexStats.getStatDocs(clusterName, nodeName, createdTime)
 
 	PostPcstatData(client, docs)
